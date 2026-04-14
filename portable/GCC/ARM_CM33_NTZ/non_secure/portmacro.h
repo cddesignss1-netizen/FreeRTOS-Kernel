@@ -56,6 +56,8 @@
 
 /* ARMv8-M common port configurations. */
 #include "portmacrocommon.h"
+#include "pico/platform.h"
+#include "hardware/sync.h"
 /*-----------------------------------------------------------*/
 
 #ifndef configENABLE_MVE
@@ -65,11 +67,133 @@
 #endif
 /*-----------------------------------------------------------*/
 
+#if ( ( configNUMBER_OF_CORES > 1 ) && ( configENABLE_MPU == 1 ) )
+    #error This CM33 RP2350 SMP integration currently supports configENABLE_MPU == 0 only.
+#endif
+
+#define portMAX_CORE_COUNT    2
+
+#if ( configNUMBER_OF_CORES < 1 || portMAX_CORE_COUNT < configNUMBER_OF_CORES )
+    #error "Invalid number of cores specified in config!"
+#endif
+
+#if ( configNUMBER_OF_CORES > 1 )
+    #ifndef configTICK_CORE
+        #define configTICK_CORE    0
+    #endif
+
+    #if ( configTICK_CORE < 0 || configTICK_CORE >= configNUMBER_OF_CORES )
+        #error "Invalid tick core specified in config!"
+    #endif
+#endif
+
+#ifndef configSMP_SPINLOCK_0
+    #define configSMP_SPINLOCK_0    PICO_SPINLOCK_ID_OS1
+#endif
+
+#ifndef configSMP_SPINLOCK_1
+    #define configSMP_SPINLOCK_1    PICO_SPINLOCK_ID_OS2
+#endif
+
+#if ( configNUMBER_OF_CORES > 1 )
+    #define portGET_CORE_ID()    get_core_num()
+#else
+    #define portGET_CORE_ID()    0
+#endif
+
+void vYieldCore( BaseType_t xCoreID );
+#define portYIELD_CORE( xCoreID )    vYieldCore( xCoreID )
+
+#if ( configNUMBER_OF_CORES > 1 )
+    #undef portENTER_CRITICAL
+    #undef portEXIT_CRITICAL
+
+    #define portCRITICAL_NESTING_IN_TCB    1
+
+    extern void vTaskEnterCritical( void );
+    extern void vTaskExitCritical( void );
+    extern UBaseType_t vTaskEnterCriticalFromISR( void );
+    extern void vTaskExitCriticalFromISR( UBaseType_t uxSavedInterruptStatus );
+#endif
+
 /**
  * @brief Critical section management.
  */
+#define portSET_INTERRUPT_MASK()    ulSetInterruptMask()
+#define portCLEAR_INTERRUPT_MASK( x ) vClearInterruptMask( x )
 #define portDISABLE_INTERRUPTS()    ulSetInterruptMask()
 #define portENABLE_INTERRUPTS()     vClearInterruptMask( 0 )
+
+#if ( configNUMBER_OF_CORES > 1 )
+    #define portENTER_CRITICAL()               vTaskEnterCritical()
+    #define portEXIT_CRITICAL()                vTaskExitCritical()
+    #define portENTER_CRITICAL_FROM_ISR()      vTaskEnterCriticalFromISR()
+    #define portEXIT_CRITICAL_FROM_ISR( x )    vTaskExitCriticalFromISR( x )
+#endif
+
+#define portRTOS_SPINLOCK_COUNT    2
+
+#if PICO_SDK_VERSION_MAJOR < 2
+__force_inline static bool spin_try_lock_unsafe( spin_lock_t * pxLock )
+{
+    return *pxLock;
+}
+#endif
+
+static inline void vPortRecursiveLock( BaseType_t xCoreID,
+                                       uint32_t ulLockNum,
+                                       spin_lock_t * pxSpinLock,
+                                       BaseType_t xAcquire )
+{
+    static volatile uint8_t ucOwnedByCore[ portMAX_CORE_COUNT ][ portRTOS_SPINLOCK_COUNT ];
+    static volatile uint8_t ucRecursionCountByLock[ portRTOS_SPINLOCK_COUNT ];
+
+    configASSERT( ulLockNum < portRTOS_SPINLOCK_COUNT );
+
+    if( xAcquire != pdFALSE )
+    {
+        if( !spin_try_lock_unsafe( pxSpinLock ) )
+        {
+            if( ucOwnedByCore[ xCoreID ][ ulLockNum ] != 0U )
+            {
+                configASSERT( ucRecursionCountByLock[ ulLockNum ] != 255U );
+                ucRecursionCountByLock[ ulLockNum ]++;
+                return;
+            }
+
+            spin_lock_unsafe_blocking( pxSpinLock );
+        }
+
+        configASSERT( ucRecursionCountByLock[ ulLockNum ] == 0U );
+        ucRecursionCountByLock[ ulLockNum ] = 1U;
+        ucOwnedByCore[ xCoreID ][ ulLockNum ] = 1U;
+    }
+    else
+    {
+        configASSERT( ucOwnedByCore[ xCoreID ][ ulLockNum ] != 0U );
+        configASSERT( ucRecursionCountByLock[ ulLockNum ] != 0U );
+
+        ucRecursionCountByLock[ ulLockNum ]--;
+
+        if( ucRecursionCountByLock[ ulLockNum ] == 0U )
+        {
+            ucOwnedByCore[ xCoreID ][ ulLockNum ] = 0U;
+            spin_unlock_unsafe( pxSpinLock );
+        }
+    }
+}
+
+#if ( configNUMBER_OF_CORES == 1 )
+    #define portGET_ISR_LOCK( xCoreID )
+    #define portRELEASE_ISR_LOCK( xCoreID )
+    #define portGET_TASK_LOCK( xCoreID )
+    #define portRELEASE_TASK_LOCK( xCoreID )
+#else
+    #define portGET_ISR_LOCK( xCoreID )         vPortRecursiveLock( ( xCoreID ), 0, spin_lock_instance( configSMP_SPINLOCK_0 ), pdTRUE )
+    #define portRELEASE_ISR_LOCK( xCoreID )     vPortRecursiveLock( ( xCoreID ), 0, spin_lock_instance( configSMP_SPINLOCK_0 ), pdFALSE )
+    #define portGET_TASK_LOCK( xCoreID )        vPortRecursiveLock( ( xCoreID ), 1, spin_lock_instance( configSMP_SPINLOCK_1 ), pdTRUE )
+    #define portRELEASE_TASK_LOCK( xCoreID )    vPortRecursiveLock( ( xCoreID ), 1, spin_lock_instance( configSMP_SPINLOCK_1 ), pdFALSE )
+#endif
 /*-----------------------------------------------------------*/
 
 /* *INDENT-OFF* */

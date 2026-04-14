@@ -43,6 +43,12 @@
 /* Portasm includes. */
 #include "portasm.h"
 
+#if ( configNUMBER_OF_CORES > 1 )
+    #include "pico/multicore.h"
+    #include "hardware/irq.h"
+    #include "hardware/structs/sio.h"
+#endif
+
 #if ( configENABLE_TRUSTZONE == 1 )
     /* Secure components includes. */
     #include "secure_context.h"
@@ -50,6 +56,10 @@
 #endif /* configENABLE_TRUSTZONE */
 
 #undef MPU_WRAPPERS_INCLUDED_FROM_API_FILE
+
+#if ( ( configNUMBER_OF_CORES > 1 ) && ( configENABLE_MPU == 1 ) )
+    #error This CM33 RP2350 SMP integration currently supports configENABLE_MPU == 0 only.
+#endif
 
 /**
  * The FreeRTOS Cortex M33 port can be configured to run on the Secure Side only
@@ -489,6 +499,21 @@ void SysTick_Handler( void ) PRIVILEGED_FUNCTION;
  */
 portDONT_DISCARD void vPortSVCHandler_C( uint32_t * pulCallerStackAddress ) PRIVILEGED_FUNCTION;
 
+#if ( configNUMBER_OF_CORES == 1 )
+    extern void * volatile pxCurrentTCB;
+#else
+    extern void * volatile pxCurrentTCBs[ configNUMBER_OF_CORES ];
+#endif
+
+portDONT_DISCARD BaseType_t xPortGetCoreID( void ) PRIVILEGED_FUNCTION;
+portDONT_DISCARD void * volatile * vPortGetCurrentTCBStorage( void ) PRIVILEGED_FUNCTION;
+
+#if ( configNUMBER_OF_CORES > 1 )
+    static BaseType_t xPortStartSchedulerOnCore( void ) PRIVILEGED_FUNCTION;
+    static void prvDisableInterruptsAndPortStartSchedulerOnCore( void ) PRIVILEGED_FUNCTION;
+    static void prvFIFOInterruptHandler( void ) PRIVILEGED_FUNCTION;
+#endif
+
 #if ( ( configENABLE_MPU == 1 ) && ( configUSE_MPU_WRAPPERS_V1 == 0 ) )
 
     /**
@@ -616,6 +641,11 @@ portDONT_DISCARD void vPortSVCHandler_C( uint32_t * pulCallerStackAddress ) PRIV
      */
     PRIVILEGED_DATA static uint32_t ulStoppedTimerCompensation = 0;
 #endif /* configUSE_TICKLESS_IDLE */
+
+#if ( configNUMBER_OF_CORES > 1 )
+    #define portINVALID_CORE_NUMBER    0xffU
+    PRIVILEGED_DATA static uint8_t ucPrimaryCoreNum = portINVALID_CORE_NUMBER;
+#endif
 /*-----------------------------------------------------------*/
 
 #if ( configUSE_TICKLESS_IDLE == 1 )
@@ -896,6 +926,69 @@ static void prvTaskExitError( void )
 }
 /*-----------------------------------------------------------*/
 
+portDONT_DISCARD BaseType_t xPortGetCoreID( void )
+{
+    return ( BaseType_t ) portGET_CORE_ID();
+}
+/*-----------------------------------------------------------*/
+
+portDONT_DISCARD void * volatile * vPortGetCurrentTCBStorage( void )
+{
+    #if ( configNUMBER_OF_CORES == 1 )
+        return &pxCurrentTCB;
+    #else
+        return &pxCurrentTCBs[ portGET_CORE_ID() ];
+    #endif
+}
+/*-----------------------------------------------------------*/
+
+#if ( configNUMBER_OF_CORES > 1 )
+
+    static void prvFIFOInterruptHandler( void )
+    {
+        multicore_fifo_drain();
+        multicore_fifo_clear_irq();
+        portYIELD_FROM_ISR( pdTRUE );
+    }
+
+    static BaseType_t xPortStartSchedulerOnCore( void )
+    {
+        portNVIC_SHPR3_REG |= portNVIC_PENDSV_PRI;
+        portNVIC_SHPR2_REG = 0;
+
+        if( ucPrimaryCoreNum == ( uint8_t ) portGET_CORE_ID() )
+        {
+            portNVIC_SHPR3_REG |= portNVIC_SYSTICK_PRI;
+            vPortSetupTimerInterrupt();
+        }
+
+        multicore_fifo_clear_irq();
+        multicore_fifo_drain();
+
+        {
+            uint32_t ulIRQNum = ( uint32_t ) SIO_FIFO_IRQ_NUM( portGET_CORE_ID() );
+
+            irq_set_priority( ulIRQNum, ( uint8_t ) portMIN_INTERRUPT_PRIORITY );
+            irq_set_exclusive_handler( ulIRQNum, prvFIFOInterruptHandler );
+            irq_set_enabled( ulIRQNum, 1 );
+        }
+
+        vStartFirstTask();
+        vTaskSwitchContext( portGET_CORE_ID() );
+        prvTaskExitError();
+
+        return 0;
+    }
+
+    static void prvDisableInterruptsAndPortStartSchedulerOnCore( void )
+    {
+        portDISABLE_INTERRUPTS();
+        ( void ) xPortStartSchedulerOnCore();
+    }
+
+#endif /* configNUMBER_OF_CORES > 1 */
+/*-----------------------------------------------------------*/
+
 #if ( ( configENABLE_MPU == 1 ) && ( configUSE_MPU_WRAPPERS_V1 == 0 ) )
 
     static uint32_t prvGetRegionAccessPermissions( uint32_t ulRBARValue ) /* PRIVILEGED_FUNCTION */
@@ -1044,13 +1137,24 @@ void vPortYield( void ) /* PRIVILEGED_FUNCTION */
 }
 /*-----------------------------------------------------------*/
 
+#if ( configNUMBER_OF_CORES > 1 )
+
+    void vYieldCore( BaseType_t xCoreID )
+    {
+        configASSERT( xCoreID != portGET_CORE_ID() );
+        sio_hw->fifo_wr = 0;
+    }
+
+#endif /* configNUMBER_OF_CORES > 1 */
+/*-----------------------------------------------------------*/
+
 #if ( configNUMBER_OF_CORES == 1 )
     void vPortEnterCritical( void ) /* PRIVILEGED_FUNCTION */
     {
         portDISABLE_INTERRUPTS();
         ulCriticalNesting++;
         /* Barriers are normally not required but do ensure the code is
-        * completely within the specified behaviour for the architecture. */
+         * completely within the specified behaviour for the architecture. */
         __asm volatile ( "dsb" ::: "memory" );
         __asm volatile ( "isb" );
     }
@@ -1798,69 +1902,58 @@ BaseType_t xPortStartScheduler( void ) /* PRIVILEGED_FUNCTION */
     }
     #endif /* configENABLE_MPU */
 
-    #if ( configNUMBER_OF_CORES > 1 )
+    #if ( configNUMBER_OF_CORES == 1 )
+    {
         /* Start the timer that generates the tick ISR. Interrupts are disabled
          * here already. */
         vPortSetupTimerInterrupt();
-        /* Initialize the critical nesting count for all cores. */
-        for ( uint8_t ucCoreID = 0; ucCoreID < configNUMBER_OF_CORES; ucCoreID++ )
+
+        /* Initialize the critical nesting count ready for the first task. */
+        ulCriticalNesting = 0;
+
+        #if ( ( configENABLE_MPU == 1 ) && ( configUSE_MPU_WRAPPERS_V1 == 0 ) )
+        {
+            xSchedulerRunning = pdTRUE;
+        }
+        #endif /* ( ( configENABLE_MPU == 1 ) && ( configUSE_MPU_WRAPPERS_V1 == 0 ) ) */
+
+        /* Start the first task. */
+        vStartFirstTask();
+
+        /* Should never get here as the tasks will now be executing. Call the task
+         * exit error function to prevent compiler warnings about a static function
+         * not being called in the case that the application writer overrides this
+         * functionality by defining configTASK_RETURN_ADDRESS. Call
+         * vTaskSwitchContext() so link time optimization does not remove the
+         * symbol. */
+        vTaskSwitchContext();
+        prvTaskExitError();
+    }
+    #else /* configNUMBER_OF_CORES == 1 */
+    {
+        spin_lock_claim( configSMP_SPINLOCK_0 );
+        spin_lock_claim( configSMP_SPINLOCK_1 );
+
+        for( uint8_t ucCoreID = 0; ucCoreID < configNUMBER_OF_CORES; ucCoreID++ )
         {
             ulCriticalNestings[ ucCoreID ] = 0;
         }
-        /* Signal that primary core has done all the necessary initialisations. */
-        ucPrimaryCoreInitDoneFlag = 1;
-        /* Wake up secondary cores */
-        BaseType_t xWakeResult = configWAKE_SECONDARY_CORES();
-        configASSERT( xWakeResult == pdTRUE );
 
-        /* Hold the primary core here until all the secondary cores are ready, this would be achieved only when
-         * all elements of ucSecondaryCoresReadyFlags are set.
-         */
-        while( 1 )
+        ucPrimaryCoreNum = ( uint8_t ) configTICK_CORE;
+        configASSERT( portGET_CORE_ID() == 0 );
+
+        #if ( ( configENABLE_MPU == 1 ) && ( configUSE_MPU_WRAPPERS_V1 == 0 ) )
         {
-            BaseType_t xAllCoresReady = pdTRUE;
-            for( uint8_t ucCoreID = 0; ucCoreID < ( configNUMBER_OF_CORES - 1 ); ucCoreID++ )
-            {
-                if( ucSecondaryCoresReadyFlags[ ucCoreID ] != pdTRUE )
-                {
-                    xAllCoresReady = pdFALSE;
-                    break;
-                }
-                }
-
-            if ( xAllCoresReady == pdTRUE )
-            {
-                break;
-            }
+            xSchedulerRunning = pdTRUE;
         }
-    #else /* if ( configNUMBER_OF_CORES > 1 ) */
-        /* Start the timer that generates the tick ISR. */
-        vPortSetupTimerInterrupt();
-        /* Initialize the critical nesting count ready for the first task. */
-        ulCriticalNesting = 0;
-    #endif /* if ( configNUMBER_OF_CORES > 1 ) */
+        #endif /* ( ( configENABLE_MPU == 1 ) && ( configUSE_MPU_WRAPPERS_V1 == 0 ) ) */
 
-    #if ( ( configENABLE_MPU == 1 ) && ( configUSE_MPU_WRAPPERS_V1 == 0 ) )
-    {
-        xSchedulerRunning = pdTRUE;
+        multicore_reset_core1();
+        multicore_launch_core1( prvDisableInterruptsAndPortStartSchedulerOnCore );
+
+        ( void ) xPortStartSchedulerOnCore();
     }
-    #endif /* ( ( configENABLE_MPU == 1 ) && ( configUSE_MPU_WRAPPERS_V1 == 0 ) ) */
-
-    /* Start the first task. */
-    vStartFirstTask();
-
-    /* Should never get here as the tasks will now be executing. Call the task
-     * exit error function to prevent compiler warnings about a static function
-     * not being called in the case that the application writer overrides this
-     * functionality by defining configTASK_RETURN_ADDRESS. Call
-     * vTaskSwitchContext() so link time optimization does not remove the
-     * symbol. */
-    #if ( configNUMBER_OF_CORES > 1 )
-        vTaskSwitchContext( portGET_CORE_ID() );
-    #else
-        vTaskSwitchContext();
-    #endif
-    prvTaskExitError();
+    #endif /* configNUMBER_OF_CORES == 1 */
 
     /* Should not get here. */
     return 0;

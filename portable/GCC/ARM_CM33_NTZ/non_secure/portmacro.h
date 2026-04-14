@@ -58,6 +58,8 @@
 
 /* ARMv8-M common port configurations. */
 #include "portmacrocommon.h"
+#include "pico/platform.h"
+#include "hardware/sync.h"
 /*-----------------------------------------------------------*/
 
 #ifndef configENABLE_MVE
@@ -66,6 +68,16 @@
     #error configENABLE_MVE must be left undefined, or defined to 0 for the Cortex-M33.
 #endif
 /*-----------------------------------------------------------*/
+
+#ifndef configSMP_SPINLOCK_0
+    #define configSMP_SPINLOCK_0    PICO_SPINLOCK_ID_OS1
+#endif
+
+#ifndef configSMP_SPINLOCK_1
+    #define configSMP_SPINLOCK_1    PICO_SPINLOCK_ID_OS2
+#endif
+
+#define portCRITICAL_NESTING_IN_TCB    1
 
 /**
  * @brief Critical section management.

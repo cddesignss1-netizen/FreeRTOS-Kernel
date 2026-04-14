@@ -40,6 +40,9 @@
 /* System call numbers includes. */
 #include "mpu_syscall_numbers.h"
 
+extern BaseType_t xPortGetCoreID( void );
+extern void * volatile * vPortGetCurrentTCBStorage( void );
+
 /* MPU_WRAPPERS_INCLUDED_FROM_API_FILE is needed to be defined only for the
  * header files. */
 #undef MPU_WRAPPERS_INCLUDED_FROM_API_FILE
@@ -129,56 +132,67 @@
 
     void vRestoreContextOfFirstTask( void ) /* __attribute__ (( naked )) PRIVILEGED_FUNCTION */
     {
-        __asm volatile
-        (
-            "   .syntax unified                                 \n"
-            "                                                   \n"
-        /*
-         * The SMP-specific logic below is derived from the Raspberry Pi
-         * implementation in the FreeRTOS-Kernel-Community-Supported-Ports project.
-         * Source: GCC/RP2350_ARM_NTZ/non_secure/portasm.c
-         * Upstream commit: 8b2955f6d97bf4cd582db9f5b62d9eb1587b76d7
-         */
-        #if ( configNUMBER_OF_CORES == 1)
-            "   ldr  r2, =pxCurrentTCB                          \n" /* Read the location of pxCurrentTCB i.e. &( pxCurrentTCB ). */
-            "   ldr  r1, [r2]                                   \n" /* Read pxCurrentTCB. */
-        #else /* if ( configNUMBER_OF_CORES == 1) */
-            "   ldr r1, =ulFirstTaskLiteralPool                 \n" /* Get the location of the current TCB and the Id of the current core. */
-            "   ldmia r1!, {r2, r3}                             \n"
-            "   ldr r2, [r2]                                    \n" /* r2 = Core Id */
-            "   ldr r1, [r3, r2, LSL #2]                        \n" /* r1 = pxCurrentTCBs[CORE_ID] */
-        #endif /* if ( configNUMBER_OF_CORES == 1) */
-            "   ldr  r0, [r1]                                   \n" /* Read top of stack from TCB - The first item in pxCurrentTCB is the task top of stack. */
-            "                                                   \n"
-        #if ( configENABLE_PAC == 1 )
-            "   ldmia r0!, {r1-r4}                              \n" /* Read task's dedicated PAC key from stack. */
-            "   msr  PAC_KEY_P_3, r1                            \n" /* Write the task's dedicated PAC key to the PAC key registers. */
-            "   msr  PAC_KEY_P_2, r2                            \n"
-            "   msr  PAC_KEY_P_1, r3                            \n"
-            "   msr  PAC_KEY_P_0, r4                            \n"
-            "   clrm {r1-r4}                                    \n" /* Clear r1-r4. */
-        #endif /* configENABLE_PAC */
-            "                                                   \n"
-            "   ldm  r0!, {r1-r2}                               \n" /* Read from stack - r1 = PSPLIM and r2 = EXC_RETURN. */
-            "   msr  psplim, r1                                 \n" /* Set this task's PSPLIM value. */
-            "   mrs  r1, control                                \n" /* Obtain current control register value. */
-            "   orrs r1, r1, #2                                 \n" /* r1 = r1 | 0x2 - Set the second bit to use the program stack pointer (PSP). */
-            "   msr control, r1                                 \n" /* Write back the new control register value. */
-            "   adds r0, #32                                    \n" /* Discard everything up to r0. */
-            "   msr  psp, r0                                    \n" /* This is now the new top of stack to use in the task. */
-            "   isb                                             \n"
-            "   mov  r0, #0                                     \n"
-            "   msr  basepri, r0                                \n" /* Ensure that interrupts are enabled when the first task starts. */
-            "   bx   r2                                         \n" /* Finally, branch to EXC_RETURN. */
-        #if ( configNUMBER_OF_CORES > 1 )
-            "                                                   \n"
-            "     .align 4                                      \n"
-            "ulFirstTaskLiteralPool:                            \n"
-            "    .word %c0                                      \n" /* CORE_ID_REGISTER */
-            "    .word pxCurrentTCBs                            \n"
-            :: "i" (configCORE_ID_REGISTER)
-        #endif /* if ( configNUMBER_OF_CORES > 1 ) */
-        );
+        #if ( configNUMBER_OF_CORES == 1 )
+            __asm volatile
+            (
+                "   .syntax unified                                 \n"
+                "                                                   \n"
+                "   ldr  r2, =pxCurrentTCB                          \n" /* Read the location of pxCurrentTCB i.e. &( pxCurrentTCB ). */
+                "   ldr  r1, [r2]                                   \n" /* Read pxCurrentTCB. */
+                "   ldr  r0, [r1]                                   \n" /* Read top of stack from TCB - The first item in pxCurrentTCB is the task top of stack. */
+                "                                                   \n"
+            #if ( configENABLE_PAC == 1 )
+                "   ldmia r0!, {r1-r4}                              \n" /* Read task's dedicated PAC key from stack. */
+                "   msr  PAC_KEY_P_3, r1                            \n" /* Write the task's dedicated PAC key to the PAC key registers. */
+                "   msr  PAC_KEY_P_2, r2                            \n"
+                "   msr  PAC_KEY_P_1, r3                            \n"
+                "   msr  PAC_KEY_P_0, r4                            \n"
+                "   clrm {r1-r4}                                    \n" /* Clear r1-r4. */
+            #endif /* configENABLE_PAC */
+                "                                                   \n"
+                "   ldm  r0!, {r1-r2}                               \n" /* Read from stack - r1 = PSPLIM and r2 = EXC_RETURN. */
+                "   msr  psplim, r1                                 \n" /* Set this task's PSPLIM value. */
+                "   mrs  r1, control                                \n" /* Obtain current control register value. */
+                "   orrs r1, r1, #2                                 \n" /* r1 = r1 | 0x2 - Set the second bit to use the program stack pointer (PSP). */
+                "   msr control, r1                                 \n" /* Write back the new control register value. */
+                "   adds r0, #32                                    \n" /* Discard everything up to r0. */
+                "   msr  psp, r0                                    \n" /* This is now the new top of stack to use in the task. */
+                "   isb                                             \n"
+                "   mov  r0, #0                                     \n"
+                "   msr  basepri, r0                                \n" /* Ensure that interrupts are enabled when the first task starts. */
+                "   bx   r2                                         \n" /* Finally, branch to EXC_RETURN. */
+            );
+        #else /* configNUMBER_OF_CORES == 1 */
+            __asm volatile
+            (
+                "   .syntax unified                                 \n"
+                "                                                   \n"
+                "   bl   vPortGetCurrentTCBStorage                  \n"
+                "   ldr  r1, [r0]                                   \n"
+                "   ldr  r0, [r1]                                   \n"
+                "                                                   \n"
+            #if ( configENABLE_PAC == 1 )
+                "   ldmia r0!, {r1-r4}                              \n" /* Read task's dedicated PAC key from stack. */
+                "   msr  PAC_KEY_P_3, r1                            \n" /* Write the task's dedicated PAC key to the PAC key registers. */
+                "   msr  PAC_KEY_P_2, r2                            \n"
+                "   msr  PAC_KEY_P_1, r3                            \n"
+                "   msr  PAC_KEY_P_0, r4                            \n"
+                "   clrm {r1-r4}                                    \n" /* Clear r1-r4. */
+            #endif /* configENABLE_PAC */
+                "                                                   \n"
+                "   ldm  r0!, {r1-r2}                               \n" /* Read from stack - r1 = PSPLIM and r2 = EXC_RETURN. */
+                "   msr  psplim, r1                                 \n" /* Set this task's PSPLIM value. */
+                "   mrs  r1, control                                \n" /* Obtain current control register value. */
+                "   orrs r1, r1, #2                                 \n" /* r1 = r1 | 0x2 - Set the second bit to use the program stack pointer (PSP). */
+                "   msr control, r1                                 \n" /* Write back the new CONTROL register value. */
+                "   adds r0, #32                                    \n" /* Discard everything up to r0. */
+                "   msr  psp, r0                                    \n" /* This is now the new top of stack to use in the task. */
+                "   isb                                             \n"
+                "   mov  r0, #0                                     \n"
+                "   msr  basepri, r0                                \n" /* Ensure that interrupts are enabled when the first task starts. */
+                "   bx   r2                                         \n" /* Finally, branch to EXC_RETURN. */
+            );
+        #endif /* configNUMBER_OF_CORES == 1 */
     }
 
 #endif /* configENABLE_MPU */
@@ -417,101 +431,137 @@ void vClearInterruptMask( __attribute__( ( unused ) ) uint32_t ulMask ) /* __att
 
     void PendSV_Handler( void ) /* __attribute__ (( naked )) PRIVILEGED_FUNCTION */
     {
-        __asm volatile
-        (
-            "   .syntax unified                                 \n"
-            "                                                   \n"
-            "   mrs r0, psp                                     \n" /* Read PSP in r0. */
-            "                                                   \n"
-        #if ( ( configENABLE_FPU == 1 ) || ( configENABLE_MVE == 1 ) )
-            "   tst lr, #0x10                                   \n" /* Test Bit[4] in LR. Bit[4] of EXC_RETURN is 0 if the Extended Stack Frame is in use. */
-            "   it eq                                           \n"
-            "   vstmdbeq r0!, {s16-s31}                         \n" /* Store the additional FP context registers which are not saved automatically. */
-        #endif /* configENABLE_FPU || configENABLE_MVE */
-            "                                                   \n"
-            "   mrs r2, psplim                                  \n" /* r2 = PSPLIM. */
-            "   mov r3, lr                                      \n" /* r3 = LR/EXC_RETURN. */
-            "   stmdb r0!, {r2-r11}                             \n" /* Store on the stack - PSPLIM, LR and registers that are not automatically saved. */
-            "                                                   \n"
-        #if ( configENABLE_PAC == 1 )
-            "   mrs  r1, PAC_KEY_P_3                            \n" /* Read task's dedicated PAC key from the PAC key registers. */
-            "   mrs  r2, PAC_KEY_P_2                            \n"
-            "   mrs  r3, PAC_KEY_P_1                            \n"
-            "   mrs  r4, PAC_KEY_P_0                            \n"
-            "   stmdb r0!, {r1-r4}                              \n" /* Store the task's dedicated PAC key on the stack. */
-            "   clrm {r1-r4}                                    \n" /* Clear r1-r4. */
-        #endif /* configENABLE_PAC */
-            "                                                   \n"
-        /*
-         * The SMP-specific logic below is derived from the Raspberry Pi
-         * implementation in the FreeRTOS-Kernel-Community-Supported-Ports project.
-         * Source: GCC/RP2350_ARM_NTZ/non_secure/portasm.c
-         * Upstream commit: 8b2955f6d97bf4cd582db9f5b62d9eb1587b76d7
-         */
-        #if ( configNUMBER_OF_CORES == 1)
-            "   ldr r2, =pxCurrentTCB                           \n" /* Read the location of pxCurrentTCB i.e. &( pxCurrentTCB ). */
-            "   ldr r1, [r2]                                    \n" /* Read pxCurrentTCB. */
-        #else /* if ( configNUMBER_OF_CORES == 1) */
-            "   ldr r1, =ulPendSVLiteralPool                    \n" /* Get the location of the current TCB and the Id of the current core. */
-            "   ldmia r1!, {r2, r3}                             \n"
-            "   ldr r2, [r2]                                    \n" /* r2 = Core Id */
-            "   ldr r1, [r3, r2, LSL #2]                        \n" /* r1 = pxCurrentTCBs[CORE_ID] */
-        #endif /* if ( configNUMBER_OF_CORES == 1) */
-            "   str r0, [r1]                                    \n" /* Save the new top of stack in TCB. */
-            "                                                   \n"
-            "   mov r0, %0                                      \n" /* r0 = configMAX_SYSCALL_INTERRUPT_PRIORITY */
-            "   msr basepri, r0                                 \n" /* Disable interrupts up to configMAX_SYSCALL_INTERRUPT_PRIORITY. */
-            "   dsb                                             \n"
-            "   isb                                             \n"
-        #if ( configNUMBER_OF_CORES > 1)
-            "   mov r0, r2                                      \n" /* r0 = ucPortGetCoreID() */
-        #endif /* if ( configNUMBER_OF_CORES == 1) */
-            "   bl vTaskSwitchContext                           \n"
-            "   mov r0, #0                                      \n" /* r0 = 0. */
-            "   msr basepri, r0                                 \n" /* Enable interrupts. */
-            "                                                   \n"
-        #if ( configNUMBER_OF_CORES == 1)
-            "   ldr r2, =pxCurrentTCB                           \n" /* Read the location of pxCurrentTCB i.e. &( pxCurrentTCB ). */
-            "   ldr r1, [r2]                                    \n" /* Read pxCurrentTCB. */
-        #else /* if ( configNUMBER_OF_CORES == 1) */
-            "   ldr r1, =ulPendSVLiteralPool                    \n" /* Get the location of the current TCB and the Id of the current core. */
-            "   ldmia r1!, {r2, r3}                             \n"
-            "   ldr r2, [r2]                                    \n" /* r2 = Core Id */
-            "   ldr r1, [r3, r2, LSL #2]                        \n" /* r1 = pxCurrentTCBs[CORE_ID] */
-        #endif /* if ( configNUMBER_OF_CORES == 1) */
-            "   ldr r0, [r1]                                    \n" /* The first item in pxCurrentTCB is the task top of stack. r0 now points to the top of stack. */
-            "                                                   \n"
-        #if ( configENABLE_PAC == 1 )
-            "   ldmia r0!, {r2-r5}                              \n" /* Read task's dedicated PAC key from stack. */
-            "   msr  PAC_KEY_P_3, r2                            \n" /* Write the task's dedicated PAC key to the PAC key registers. */
-            "   msr  PAC_KEY_P_2, r3                            \n"
-            "   msr  PAC_KEY_P_1, r4                            \n"
-            "   msr  PAC_KEY_P_0, r5                            \n"
-            "   clrm {r2-r5}                                    \n" /* Clear r2-r5. */
-        #endif /* configENABLE_PAC */
-            "                                                   \n"
-            "   ldmia r0!, {r2-r11}                             \n" /* Read from stack - r2 = PSPLIM, r3 = LR and r4-r11 restored. */
-            "                                                   \n"
-        #if ( ( configENABLE_FPU == 1 ) || ( configENABLE_MVE == 1 ) )
-            "   tst r3, #0x10                                   \n" /* Test Bit[4] in LR. Bit[4] of EXC_RETURN is 0 if the Extended Stack Frame is in use. */
-            "   it eq                                           \n"
-            "   vldmiaeq r0!, {s16-s31}                         \n" /* Restore the additional FP context registers which are not restored automatically. */
-        #endif /* configENABLE_FPU || configENABLE_MVE */
-            "                                                   \n"
-            "   msr psplim, r2                                  \n" /* Restore the PSPLIM register value for the task. */
-            "   msr psp, r0                                     \n" /* Remember the new top of stack for the task. */
-            "   bx r3                                           \n"
-        #if ( configNUMBER_OF_CORES > 1 )
-            "   .align 4                           \n"
-            "   ulPendSVLiteralPool:               \n"
-            "   .word %c1                          \n" /* CORE_ID_REGISTER */
-            "   .word pxCurrentTCBs                \n"
-            :: "i" ( configMAX_SYSCALL_INTERRUPT_PRIORITY ), "i" ( configCORE_ID_REGISTER )
-        #else /* #if ( configNUMBER_OF_CORES > 1 ) */
-            :: "i" ( configMAX_SYSCALL_INTERRUPT_PRIORITY )
-        #endif /* #if ( configNUMBER_OF_CORES > 1 ) */
-
-        );
+        #if ( configNUMBER_OF_CORES == 1 )
+            __asm volatile
+            (
+                "   .syntax unified                                 \n"
+                "                                                   \n"
+                "   mrs r0, psp                                     \n" /* Read PSP in r0. */
+                "                                                   \n"
+            #if ( ( configENABLE_FPU == 1 ) || ( configENABLE_MVE == 1 ) )
+                "   tst lr, #0x10                                   \n" /* Test Bit[4] in LR. Bit[4] of EXC_RETURN is 0 if the Extended Stack Frame is in use. */
+                "   it eq                                           \n"
+                "   vstmdbeq r0!, {s16-s31}                         \n" /* Store the additional FP context registers which are not saved automatically. */
+            #endif /* configENABLE_FPU || configENABLE_MVE */
+                "                                                   \n"
+                "   mrs r2, psplim                                  \n" /* r2 = PSPLIM. */
+                "   mov r3, lr                                      \n" /* r3 = LR/EXC_RETURN. */
+                "   stmdb r0!, {r2-r11}                             \n" /* Store on the stack - PSPLIM, LR and registers that are not automatically saved. */
+                "                                                   \n"
+            #if ( configENABLE_PAC == 1 )
+                "   mrs  r1, PAC_KEY_P_3                            \n" /* Read task's dedicated PAC key from the PAC key registers. */
+                "   mrs  r2, PAC_KEY_P_2                            \n"
+                "   mrs  r3, PAC_KEY_P_1                            \n"
+                "   mrs  r4, PAC_KEY_P_0                            \n"
+                "   stmdb r0!, {r1-r4}                              \n" /* Store the task's dedicated PAC key on the stack. */
+                "   clrm {r1-r4}                                    \n" /* Clear r1-r4. */
+            #endif /* configENABLE_PAC */
+                "                                                   \n"
+                "   ldr r2, =pxCurrentTCB                           \n" /* Read the location of pxCurrentTCB i.e. &( pxCurrentTCB ). */
+                "   ldr r1, [r2]                                    \n" /* Read pxCurrentTCB. */
+                "   str r0, [r1]                                    \n" /* Save the new top of stack in TCB. */
+                "                                                   \n"
+                "   mov r0, %0                                      \n" /* r0 = configMAX_SYSCALL_INTERRUPT_PRIORITY */
+                "   msr basepri, r0                                 \n" /* Disable interrupts up to configMAX_SYSCALL_INTERRUPT_PRIORITY. */
+                "   dsb                                             \n"
+                "   isb                                             \n"
+                "   bl vTaskSwitchContext                           \n"
+                "   mov r0, #0                                      \n" /* r0 = 0. */
+                "   msr basepri, r0                                 \n" /* Enable interrupts. */
+                "                                                   \n"
+                "   ldr r2, =pxCurrentTCB                           \n" /* Read the location of pxCurrentTCB i.e. &( pxCurrentTCB ). */
+                "   ldr r1, [r2]                                    \n" /* Read pxCurrentTCB. */
+                "   ldr r0, [r1]                                    \n" /* The first item in pxCurrentTCB is the task top of stack. r0 now points to the top of stack. */
+                "                                                   \n"
+            #if ( configENABLE_PAC == 1 )
+                "   ldmia r0!, {r2-r5}                              \n" /* Read task's dedicated PAC key from stack. */
+                "   msr  PAC_KEY_P_3, r2                            \n" /* Write the task's dedicated PAC key to the PAC key registers. */
+                "   msr  PAC_KEY_P_2, r3                            \n"
+                "   msr  PAC_KEY_P_1, r4                            \n"
+                "   msr  PAC_KEY_P_0, r5                            \n"
+                "   clrm {r2-r5}                                    \n" /* Clear r2-r5. */
+            #endif /* configENABLE_PAC */
+                "                                                   \n"
+                "   ldmia r0!, {r2-r11}                             \n" /* Read from stack - r2 = PSPLIM, r3 = LR and r4-r11 restored. */
+                "                                                   \n"
+            #if ( ( configENABLE_FPU == 1 ) || ( configENABLE_MVE == 1 ) )
+                "   tst r3, #0x10                                   \n" /* Test Bit[4] in LR. Bit[4] of EXC_RETURN is 0 if the Extended Stack Frame is in use. */
+                "   it eq                                           \n"
+                "   vldmiaeq r0!, {s16-s31}                         \n" /* Restore the additional FP context registers which are not restored automatically. */
+            #endif /* configENABLE_FPU || configENABLE_MVE */
+                "                                                   \n"
+                "   msr psplim, r2                                  \n" /* Restore the PSPLIM register value for the task. */
+                "   msr psp, r0                                     \n" /* Remember the new top of stack for the task. */
+                "   bx r3                                           \n"
+                ::"i" ( configMAX_SYSCALL_INTERRUPT_PRIORITY )
+            );
+        #else /* configNUMBER_OF_CORES == 1 */
+            __asm volatile
+            (
+                "   .syntax unified                                 \n"
+                "                                                   \n"
+                "   mrs r0, psp                                     \n" /* Read PSP in r0. */
+                "                                                   \n"
+            #if ( ( configENABLE_FPU == 1 ) || ( configENABLE_MVE == 1 ) )
+                "   tst lr, #0x10                                   \n" /* Test Bit[4] in LR. Bit[4] of EXC_RETURN is 0 if the Extended Stack Frame is in use. */
+                "   it eq                                           \n"
+                "   vstmdbeq r0!, {s16-s31}                         \n" /* Store the additional FP context registers which are not saved automatically. */
+            #endif /* configENABLE_FPU || configENABLE_MVE */
+                "                                                   \n"
+                "   mrs r2, psplim                                  \n" /* r2 = PSPLIM. */
+                "   mov r3, lr                                      \n" /* r3 = LR/EXC_RETURN. */
+                "   stmdb r0!, {r2-r11}                             \n" /* Store on the stack - PSPLIM, LR and registers that are not automatically saved. */
+                "                                                   \n"
+            #if ( configENABLE_PAC == 1 )
+                "   mrs  r1, PAC_KEY_P_3                            \n" /* Read task's dedicated PAC key from the PAC key registers. */
+                "   mrs  r2, PAC_KEY_P_2                            \n"
+                "   mrs  r3, PAC_KEY_P_1                            \n"
+                "   mrs  r4, PAC_KEY_P_0                            \n"
+                "   stmdb r0!, {r1-r4}                              \n" /* Store the task's dedicated PAC key on the stack. */
+                "   clrm {r1-r4}                                    \n" /* Clear r1-r4. */
+            #endif /* configENABLE_PAC */
+                "                                                   \n"
+                "   mov r4, r0                                      \n"
+                "   bl  vPortGetCurrentTCBStorage                   \n"
+                "   ldr r1, [r0]                                    \n"
+                "   str r4, [r1]                                    \n"
+                "                                                   \n"
+                "   mov r0, %0                                      \n" /* r0 = configMAX_SYSCALL_INTERRUPT_PRIORITY */
+                "   msr basepri, r0                                 \n" /* Disable interrupts up to configMAX_SYSCALL_INTERRUPT_PRIORITY. */
+                "   dsb                                             \n"
+                "   isb                                             \n"
+                "   bl  xPortGetCoreID                              \n"
+                "   bl  vTaskSwitchContext                          \n"
+                "   mov r0, #0                                      \n" /* r0 = 0. */
+                "   msr basepri, r0                                 \n" /* Enable interrupts. */
+                "                                                   \n"
+                "   bl  vPortGetCurrentTCBStorage                   \n"
+                "   ldr r1, [r0]                                    \n"
+                "   ldr r0, [r1]                                    \n" /* The first item in pxCurrentTCB is the task top of stack. r0 now points to the top of stack. */
+                "                                                   \n"
+            #if ( configENABLE_PAC == 1 )
+                "   ldmia r0!, {r2-r5}                              \n" /* Read task's dedicated PAC key from stack. */
+                "   msr  PAC_KEY_P_3, r2                            \n" /* Write the task's dedicated PAC key to the PAC key registers. */
+                "   msr  PAC_KEY_P_2, r3                            \n"
+                "   msr  PAC_KEY_P_1, r4                            \n"
+                "   msr  PAC_KEY_P_0, r5                            \n"
+                "   clrm {r2-r5}                                    \n" /* Clear r2-r5. */
+            #endif /* configENABLE_PAC */
+                "                                                   \n"
+                "   ldmia r0!, {r2-r11}                             \n" /* Read from stack - r2 = PSPLIM, r3 = LR and r4-r11 restored. */
+                "                                                   \n"
+            #if ( ( configENABLE_FPU == 1 ) || ( configENABLE_MVE == 1 ) )
+                "   tst r3, #0x10                                   \n" /* Test Bit[4] in LR. Bit[4] of EXC_RETURN is 0 if the Extended Stack Frame is in use. */
+                "   it eq                                           \n"
+                "   vldmiaeq r0!, {s16-s31}                         \n" /* Restore the additional FP context registers which are not restored automatically. */
+            #endif /* configENABLE_FPU || configENABLE_MVE */
+                "                                                   \n"
+                "   msr psplim, r2                                  \n" /* Restore the PSPLIM register value for the task. */
+                "   msr psp, r0                                     \n" /* Remember the new top of stack for the task. */
+                "   bx r3                                           \n"
+                ::"i" ( configMAX_SYSCALL_INTERRUPT_PRIORITY )
+            );
+        #endif /* configNUMBER_OF_CORES == 1 */
     }
 
 #endif /* configENABLE_MPU */

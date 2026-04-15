@@ -251,10 +251,17 @@ void vStartFirstTask( void ) /* __attribute__ (( naked )) PRIVILEGED_FUNCTION */
     (
         "   .syntax unified                                 \n"
         "                                                   \n"
+        #if ( configNUMBER_OF_CORES > 1 )
+            "   bl  xPortGetCoreID                              \n"
+            "   cbnz r0, skip_vtor_msp_reset                    \n"
+        #endif
         "   ldr r0, =0xe000ed08                             \n" /* Use the NVIC offset register to locate the stack. */
         "   ldr r0, [r0]                                    \n" /* Read the VTOR register which gives the address of vector table. */
         "   ldr r0, [r0]                                    \n" /* The first entry in vector table is stack pointer. */
         "   msr msp, r0                                     \n" /* Set the MSP back to the start of the stack. */
+        #if ( configNUMBER_OF_CORES > 1 )
+            "skip_vtor_msp_reset:                               \n"
+        #endif
         "   cpsie i                                         \n" /* Globally enable interrupts. */
         "   cpsie f                                         \n"
         "   dsb                                             \n"

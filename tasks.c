@@ -334,10 +334,7 @@
 #define taskATTRIBUTE_IS_IDLE    ( UBaseType_t ) ( 1U << 0U )
 
 #if ( ( configNUMBER_OF_CORES > 1 ) && ( portCRITICAL_NESTING_IN_TCB == 1 ) )
-    #define portGET_CRITICAL_NESTING_COUNT( xCoreID )          ( pxCurrentTCBs[ ( xCoreID ) ]->uxCriticalNesting )
-    #define portSET_CRITICAL_NESTING_COUNT( xCoreID, x )       ( pxCurrentTCBs[ ( xCoreID ) ]->uxCriticalNesting = ( x ) )
-    #define portINCREMENT_CRITICAL_NESTING_COUNT( xCoreID )    ( pxCurrentTCBs[ ( xCoreID ) ]->uxCriticalNesting++ )
-    #define portDECREMENT_CRITICAL_NESTING_COUNT( xCoreID )    ( pxCurrentTCBs[ ( xCoreID ) ]->uxCriticalNesting-- )
+    static UBaseType_t uxCriticalNestingBeforeSchedulerStart[ configNUMBER_OF_CORES ] = { 0 };
 #endif /* #if ( ( configNUMBER_OF_CORES > 1 ) && ( portCRITICAL_NESTING_IN_TCB == 1 ) ) */
 
 #define taskBITS_PER_BYTE    ( ( size_t ) 8 )
@@ -7071,7 +7068,7 @@ static void prvResetNextTaskUnblockTime( void )
             }
             else
             {
-                mtCOVERAGE_TEST_MARKER();
+                uxCriticalNestingBeforeSchedulerStart[ xCoreID ]++;
             }
         }
 
@@ -7151,7 +7148,25 @@ static void prvResetNextTaskUnblockTime( void )
         }
         else
         {
-            mtCOVERAGE_TEST_MARKER();
+            configASSERT( uxCriticalNestingBeforeSchedulerStart[ xCoreID ] > 0U );
+
+            if( uxCriticalNestingBeforeSchedulerStart[ xCoreID ] > 0U )
+            {
+                uxCriticalNestingBeforeSchedulerStart[ xCoreID ]--;
+
+                if( uxCriticalNestingBeforeSchedulerStart[ xCoreID ] == 0U )
+                {
+                    portENABLE_INTERRUPTS();
+                }
+                else
+                {
+                    mtCOVERAGE_TEST_MARKER();
+                }
+            }
+            else
+            {
+                mtCOVERAGE_TEST_MARKER();
+            }
         }
 
         traceRETURN_vTaskExitCritical();

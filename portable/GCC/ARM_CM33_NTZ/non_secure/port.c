@@ -944,10 +944,20 @@ portDONT_DISCARD void * volatile * vPortGetCurrentTCBStorage( void )
 
 #if ( configNUMBER_OF_CORES > 1 )
 
+    __attribute__((weak)) BaseType_t vApplicationCrossCoreInterruptHook( uint8_t ucCoreID )
+    {
+        ( void ) ucCoreID;
+        return pdFALSE;
+    }
+
     static void prvFIFOInterruptHandler( void )
     {
         multicore_fifo_drain();
         multicore_fifo_clear_irq();
+        if( vApplicationCrossCoreInterruptHook( ( uint8_t ) portGET_CORE_ID() ) != pdFALSE )
+        {
+            return;
+        }
         portYIELD_FROM_ISR( pdTRUE );
     }
 
